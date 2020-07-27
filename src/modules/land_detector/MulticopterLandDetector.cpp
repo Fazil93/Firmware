@@ -67,6 +67,8 @@
 
 #include "MulticopterLandDetector.h"
 
+using matrix::Vector2f;
+using matrix::Vector3f;
 
 namespace land_detector
 {
@@ -139,20 +141,21 @@ void MulticopterLandDetector::_update_params()
 
 bool MulticopterLandDetector::_get_freefall_state()
 {
+	// if LNDMC_FFALL_THR is set to zero or invalid, disable free-fall detection.
 	if (_param_lndmc_ffall_thr.get() < 0.1f ||
-	    _param_lndmc_ffall_thr.get() > 10.0f) {	//if parameter is set to zero or invalid, disable free-fall detection.
+	    _param_lndmc_ffall_thr.get() > 10.0f) {
 		return false;
 	}
 
-	if (_vehicle_acceleration.timestamp == 0) {
-		// _sensors is not valid yet, we have to assume we're not falling.
-		return false;
+	if (hrt_elapsed_time(&_vehicle_acceleration.timestamp) < 1_s) {
+		const Vector3f accel{_vehicle_acceleration.xyz};
+
+		// norm of specific force. Should be close to 9.8 m/s^2 when landed.
+		return accel.norm() < _param_lndmc_ffall_thr.get();
 	}
 
-	// norm of specific force. Should be close to 9.8 m/s^2 when landed.
-	const matrix::Vector3f accel{_vehicle_acceleration.xyz};
-
-	return (accel.norm() < _param_lndmc_ffall_thr.get());	// true if we are currently falling
+	// otherwise we have to assume we're not falling
+	return false;
 }
 
 bool MulticopterLandDetector::_get_ground_contact_state()
@@ -163,13 +166,15 @@ bool MulticopterLandDetector::_get_ground_contact_state()
 	}
 
 	const bool lpos_available = (hrt_elapsed_time(&_vehicle_local_position.timestamp) < 1_s);
+	const bool v_xy_valid = (lpos_available && _vehicle_local_position.v_xy_valid);
+	const bool v_z_valid = (lpos_available && _vehicle_local_position.v_z_valid);
 
 	// land speed threshold, 90% of MPC_LAND_SPEED
 	const float land_speed_threshold = 0.9f * math::max(_params.landSpeed, 0.1f);
 
 	bool vertical_movement = true;
 
-	if (lpos_available && _vehicle_local_position.v_z_valid) {
+	if (v_z_valid) {
 		// Check if we are moving vertically - this might see a spike after arming due to
 		// throttle-up vibration. If accelerating fast the throttle thresholds will still give
 		// an accurate in-air indication.
@@ -186,12 +191,9 @@ bool MulticopterLandDetector::_get_ground_contact_state()
 
 
 	// Check if we are moving horizontally.
-	if (lpos_available && _vehicle_local_position.v_xy_valid) {
-
-		float gndspeed = sqrtf(_vehicle_local_position.vx * _vehicle_local_position.vx
-				       + _vehicle_local_position.vy * _vehicle_local_position.vy);
-
-		_horizontal_movement = (gndspeed > _param_lndmc_xy_vel_max.get());
+	if (v_xy_valid) {
+		const Vector2f v_xy{_vehicle_local_position.vx, _vehicle_local_position.vy};
+		_horizontal_movement = v_xy.longerThan(_param_lndmc_xy_vel_max.get());
 
 	} else {
 		_horizontal_movement = true;
@@ -200,9 +202,7 @@ bool MulticopterLandDetector::_get_ground_contact_state()
 
 	// if we have a valid velocity setpoint and the vehicle is demanded to go down but no vertical movement present,
 	// we then can assume that the vehicle hit ground
-	const bool vz_valid = (lpos_available && _vehicle_local_position.v_z_valid);
-
-	if (_vehicle_control_mode.flag_control_climb_rate_enabled && vz_valid) {
+	if (_vehicle_control_mode.flag_control_climb_rate_enabled && v_z_valid) {
 		// setpoints can briefly be NAN to signal resets, TODO: fix in multicopter position controller
 		if (PX4_ISFINITE(_vehicle_local_position_setpoint.vz)) {
 			_in_descend = (_vehicle_local_position_setpoint.vz >= land_speed_threshold);
